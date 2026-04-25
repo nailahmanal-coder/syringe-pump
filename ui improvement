@@ -1,0 +1,165 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "MYHOTSPOT";
+const char* password = "nailahsipad";
+
+WebServer server(80);
+
+// Syringe 1 motor pins
+const int dirPin1 = 21;
+const int stepPin1 = 19;
+
+// Syringe 2 motor pins
+const int dirPin2 = 23;
+const int stepPin2 = 22;
+
+String htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Clinical Syringe Control</title>
+  <style>
+    :root { --bg: #f4f7f6; --primary: #005eb8; --alarm: #d50000; }
+    body { font-family: 'Segoe UI', Arial, sans-serif; background: var(--bg); text-align: center; margin: 0; padding: 10px; transition: background 0.3s; }
+    h2 { color: var(--primary); margin-bottom: 5px; }
+    .card { background: white; border-radius: 12px; padding: 20px; margin: 10px auto; max-width: 380px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); border: 1px solid #ddd; }
+    .input-group { margin: 15px 0; text-align: left; }
+    label { font-weight: bold; font-size: 0.9rem; color: #555; display: block; margin-bottom: 5px; }
+    input { padding: 12px; width: 100%; box-sizing: border-box; border: 1px solid #ccc; border-radius: 6px; font-size: 1rem; }
+    button { padding: 14px; width: 48%; margin: 5px 1%; cursor: pointer; border: none; border-radius: 6px; font-weight: bold; font-size: 0.9rem; }
+    .btn-fwd { background: var(--primary); color: white; }
+    .btn-bwd { background: #6c757d; color: white; }
+    .btn-alarm { background: var(--alarm); color: white; width: 98%; margin-top: 10px; }
+    #status-container { margin: 20px auto; max-width: 380px; padding: 15px; border-radius: 8px; background: #333; color: #00ff00; font-family: monospace; }
+    progress { width: 100%; height: 20px; margin-top: 10px; }
+    .alarm-active { background-color: var(--alarm) !important; color: white !important; animation: blinker 0.8s linear infinite; }
+    @keyframes blinker { 50% { opacity: 0.7; } }
+  </style>
+</head>
+<body id="mainBody">
+  <h2>SYRINGE CONTROL</h2>
+  <p style="margin-top:0; color:#666;">Biomedical Engineering Interface</p>
+
+  <div class="card">
+    <h3>Syringe 1</h3>
+    <div class="input-group">
+      <label>Target Volume (mL)</label>
+      <input type="number" id="vol1" value="10.0" step="0.1">
+    </div>
+    <div class="input-group">
+      <label>Flow Rate (mL/hr)</label>
+      <input type="number" id="rate1" value="50">
+    </div>
+    <button class="btn-fwd" onclick="runInfusion(1, 1)">START</button>
+    <button class="btn-bwd" onclick="runInfusion(1, -1)">REVERSE</button>
+  </div>
+
+  <div class="card">
+    <h3>Syringe 2</h3>
+    <div class="input-group">
+      <label>Target Volume (mL)</label>
+      <input type="number" id="vol2" value="10.0" step="0.1">
+    </div>
+    <div class="input-group">
+      <label>Flow Rate (mL/hr)</label>
+      <input type="number" id="rate2" value="50">
+    </div>
+    <button class="btn-fwd" onclick="runInfusion(2, 1)">START</button>
+    <button class="btn-bwd" onclick="runInfusion(2, -1)">REVERSE</button>
+  </div>
+
+  <div id="status-container">
+    <div id="statusText">SYSTEM READY</div>
+    <progress id="pBar" value="0" max="100"></progress>
+  </div>
+
+  <button class="btn-alarm" onclick="toggleAlarm()">EMERGENCY STOP / ALARM</button>
+
+  <script>
+    function toggleAlarm() {
+      document.getElementById("mainBody").classList.toggle("alarm-active");
+      document.getElementById("statusText").textContent = "!!! ALARM TRIGGERED !!!";
+    }
+
+    async function runInfusion(motor, dir) {
+      const vol = document.getElementById("vol" + motor).value;
+      const status = document.getElementById("statusText");
+      const pBar = document.getElementById("pBar");
+
+      // MATH: Assuming 2000 steps per 1mL 
+      const steps = Math.round(vol * 2000);
+      
+      const dirLabel = dir === 1 ? "Infusing" : "Withdrawing";
+      status.textContent = dirLabel + " Syringe " + motor + "...";
+      pBar.value = 50; 
+
+      const url = "/move?motor=" + motor + "&steps=" + steps + "&dir=" + dir;
+      
+      try {
+        const response = await fetch(url);
+        const message = await response.text();
+        pBar.value = 100;
+        status.textContent = message;
+      } catch (error) {
+        status.textContent = "CONNECTION ERROR";
+        toggleAlarm();
+      }
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
+
+void moveMotor(int dirPin, int stepPin, int steps) {
+  if (steps >= 0) {
+    digitalWrite(dirPin, LOW);
+  } else {
+    digitalWrite(dirPin, HIGH);
+    steps = -steps;
+  }
+  for (int i = 0; i < steps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(800);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(800);
+  }
+}
+
+void handleRoot() {
+  server.send(200, "text/html", htmlPage);
+}
+
+void handleMove() {
+  int motor = server.arg("motor").toInt();
+  int steps = server.arg("steps").toInt();
+  int dir = server.arg("dir").toInt();
+  steps = steps * dir;
+  if (motor == 1) {
+    moveMotor(dirPin1, stepPin1, steps);
+    server.send(200, "text/plain", "Syringe 1 moved " + String(steps) + " steps");
+  } else if (motor == 2) {
+    moveMotor(dirPin2, stepPin2, steps);
+    server.send(200, "text/plain", "Syringe 2 moved " + String(steps) + " steps");
+  } else {
+    server.send(400, "text/plain", "Invalid motor selection");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  pinMode(dirPin1, OUTPUT); pinMode(stepPin1, OUTPUT);
+  pinMode(dirPin2, OUTPUT); pinMode(stepPin2, OUTPUT);
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\nConnected!");
+  Serial.println(WiFi.localIP());
+  server.on("/", handleRoot);
+  server.on("/move", handleMove);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
