@@ -1,0 +1,117 @@
+#include <WiFi.h>
+#include <WebServer.h>
+const char* ssid = "MYHOTSPOT";
+const char* password = "nailahsipad";
+WebServer server(80);
+// Syringe 1 motor pins
+const int dirPin1 = 21;
+const int stepPin1 = 19;
+// Syringe 2 motor pins
+const int dirPin2 = 23;
+const int stepPin2 = 22;
+String htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Dual Syringe Control</title>
+  <style>
+    body { font-family: Arial, sans-serif; text-align: center; padding: 20px; }
+    .card { border: 1px solid #ccc; border-radius: 10px; padding: 20px; margin: 20px auto; max-width: 320px; }
+    input { padding: 10px; margin: 10px; width: 120px; }
+    button { padding: 12px 20px; margin: 8px; cursor: pointer; }
+    #status { margin: 20px auto; max-width: 420px; padding: 12px; border-radius: 8px; background: #f3f3f3; }
+  </style>
+</head>
+<body>
+  <h2>Dual Syringe Motor Control</h2>
+  <div class="card">
+    <h3>Syringe 1</h3>
+    Steps: <input type="number" id="steps1" value="1000"><br>
+    <button onclick="moveMotor(1, 1)">Forward</button>
+    <button onclick="moveMotor(1, -1)">Backward</button>
+  </div>
+  <div class="card">
+    <h3>Syringe 2</h3>
+    Steps: <input type="number" id="steps2" value="1000"><br>
+    <button onclick="moveMotor(2, 1)">Forward</button>
+    <button onclick="moveMotor(2, -1)">Backward</button>
+  </div>
+  <div id="status">Ready</div>
+  <script>
+    async function moveMotor(motor, dir) {
+      const steps = document.getElementById("steps" + motor).value;
+      const status = document.getElementById("status");
+      const directionText = dir === 1 ? "forward" : "backward";
+      const url = "/move?motor=" + motor + "&steps=" + steps + "&dir=" + dir;
+      status.textContent = "Moving Syringe " + motor + " " + directionText + "...";
+      try {
+        const response = await fetch(url);
+        const message = await response.text();
+        if (!response.ok) {
+          status.textContent = "Error: " + message;
+          return;
+        }
+        status.textContent = message;
+      } catch (error) {
+        status.textContent = "Connection error while moving Syringe " + motor;
+      }
+    }
+  </script>
+</body>
+</html>
+)rawliteral";
+void moveMotor(int dirPin, int stepPin, int steps) {
+  if (steps >= 0) {
+    digitalWrite(dirPin, LOW);
+  } else {
+    digitalWrite(dirPin, HIGH);
+    steps = -steps;
+  }
+  for (int i = 0; i < steps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(800);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(800);
+  }
+}
+void handleRoot() {
+  server.send(200, "text/html", htmlPage);
+}
+void handleMove() {
+  int motor = server.arg("motor").toInt();
+  int steps = server.arg("steps").toInt();
+  int dir = server.arg("dir").toInt();
+  steps = steps * dir;
+  if (motor == 1) {
+    moveMotor(dirPin1, stepPin1, steps);
+    server.send(200, "text/plain",
+      "Syringe 1 moved " + String(steps) + " steps");
+  } else if (motor == 2) {
+    moveMotor(dirPin2, stepPin2, steps);
+    server.send(200, "text/plain",
+      "Syringe 2 moved " + String(steps) + " steps");
+  } else {
+    server.send(400, "text/plain", "Invalid motor selection");
+  }
+}
+void setup() {
+  Serial.begin(115200);
+  pinMode(dirPin1, OUTPUT);
+  pinMode(stepPin1, OUTPUT);
+  pinMode(dirPin2, OUTPUT);
+  pinMode(stepPin2, OUTPUT);
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConnected!");
+  Serial.println(WiFi.localIP());
+  server.on("/", handleRoot);
+  server.on("/move", handleMove);
+  server.begin();
+}
+void loop() {
+  server.handleClient();
+}
