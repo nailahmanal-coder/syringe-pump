@@ -1,0 +1,105 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "";
+const char* password = "";
+
+WebServer server(80);
+
+// Motor 1 pins
+const int dirPin1 = 21;
+const int stepPin1 = 19;
+
+// Motor 2 pins
+const int dirPin2 = 23;
+const int stepPin2 = 22;
+
+// HTML page
+String htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Dual Stepper Control</title>
+</head>
+<body>
+  <h2>Motor 1</h2>
+  <form action="/move">
+    Steps: <input type="number" name="m1">
+    
+    <h2>Motor 2</h2>
+    Steps: <input type="number" name="m2"><br><br>
+    
+    <input type="submit" value="Move Motors">
+  </form>
+</body>
+</html>
+)rawliteral";
+
+// Motor move function
+void moveMotor(int dirPin, int stepPin, int steps) {
+  if (steps >= 0) {
+    digitalWrite(dirPin, HIGH);
+  } else {
+    digitalWrite(dirPin, LOW);
+    steps = -steps;
+  }
+
+  for (int i = 0; i < steps; i++) {
+    digitalWrite(stepPin, HIGH);
+    delayMicroseconds(800);
+    digitalWrite(stepPin, LOW);
+    delayMicroseconds(800);
+  }
+}
+
+void handleRoot() {
+  server.send(200, "text/html", htmlPage);
+}
+
+void handleMove() {
+  int steps1 = 0;
+  int steps2 = 0;
+
+  if (server.hasArg("m1")) {
+    steps1 = server.arg("m1").toInt();
+  }
+  if (server.hasArg("m2")) {
+    steps2 = server.arg("m2").toInt();
+  }
+
+  // Move motors (sequential)
+  moveMotor(dirPin1, stepPin1, steps1);
+  moveMotor(dirPin2, stepPin2, steps2);
+
+  server.send(200, "text/html",
+    "<h3>Motor1: " + String(steps1) + " steps<br>Motor2: " + String(steps2) + " steps</h3><a href='/'>Go Back</a>");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(dirPin1, OUTPUT);
+  pinMode(stepPin1, OUTPUT);
+  pinMode(dirPin2, OUTPUT);
+  pinMode(stepPin2, OUTPUT);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nConnected!");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/move", handleMove);
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
