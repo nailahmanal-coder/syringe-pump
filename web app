@@ -1,0 +1,771 @@
+#include <WiFi.h>
+#include <WebServer.h>
+
+const char* ssid = "";
+const char* password = "";
+
+WebServer server(80);
+
+const int dirPin1 = 21;
+const int stepPin1 = 19;
+const int dirPin2 = 23;
+const int stepPin2 = 22;
+
+const float syringeVolumeMl = 20.0;
+const int fullStrokeSteps = 11000;
+const float stepsPerMl = fullStrokeSteps / syringeVolumeMl;
+const unsigned int minPulseWidthUs = 10;
+
+float remainingVolume1 = syringeVolumeMl;
+float remainingVolume2 = syringeVolumeMl;
+String pumpState = "Idle";
+String lastAction = "Ready";
+
+String escapeJson(const String& input) {
+  String output = "";
+  for (unsigned int i = 0; i < input.length(); i++) {
+    char c = input[i];
+    if (c == '\\' || c == '"') {
+      output += '\\';
+    }
+    output += c;
+  }
+  return output;
+}
+
+String makeJsonResponse(const String& message, const String& alarm) {
+  String json = "{";
+  json += "\"message\":\"" + escapeJson(message) + "\",";
+  json += "\"state\":\"" + escapeJson(pumpState) + "\",";
+  json += "\"remaining1\":" + String(remainingVolume1, 2) + ",";
+  json += "\"remaining2\":" + String(remainingVolume2, 2) + ",";
+  json += "\"alarm\":\"" + escapeJson(alarm) + "\"";
+  json += "}";
+  return json;
+}
+
+String htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dual Barrel Syringe Pump</title>
+  <style>
+    :root {
+      --bg: #eef3f7;
+      --panel: #ffffff;
+      --ink: #183153;
+      --muted: #62748a;
+      --accent: #1b7f8f;
+      --accent-dark: #145c67;
+      --danger: #c74747;
+      --line: #d7e0e8;
+      --shadow: 0 18px 40px rgba(24, 49, 83, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: "Trebuchet MS", Verdana, sans-serif;
+      background:
+        radial-gradient(circle at top, rgba(27, 127, 143, 0.16), transparent 32%),
+        linear-gradient(180deg, #f7fbfd 0%, var(--bg) 100%);
+      color: var(--ink);
+      padding: 18px;
+    }
+
+    .shell {
+      max-width: 980px;
+      margin: 0 auto;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, #123c63, #1b7f8f);
+      color: white;
+      border-radius: 24px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .hero h1 {
+      margin: 0 0 8px;
+      font-size: 1.9rem;
+    }
+
+    .hero p {
+      margin: 0;
+      color: rgba(255, 255, 255, 0.9);
+    }
+
+    .status-grid,
+    .pump-grid {
+      display: grid;
+      gap: 16px;
+      margin-top: 18px;
+    }
+
+    .status-grid {
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    }
+
+    .pump-grid {
+      grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .stat-value {
+      display: block;
+      margin-top: 6px;
+      font-size: 1.35rem;
+      font-weight: bold;
+    }
+
+    .label {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+
+    .mode-switch {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+      margin-top: 14px;
+    }
+
+    .mode-switch button,
+    .action-row button,
+    .run-button {
+      border: none;
+      border-radius: 14px;
+      padding: 14px 16px;
+      font-size: 1rem;
+      cursor: pointer;
+    }
+
+    .mode-switch button {
+      background: #dfe9ef;
+      color: var(--ink);
+    }
+
+    .mode-switch button.active {
+      background: var(--accent);
+      color: white;
+    }
+
+    .pump-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 14px;
+    }
+
+    .pump-header h2 {
+      margin: 0;
+      font-size: 1.2rem;
+    }
+
+    .pill {
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: #edf6f8;
+      color: var(--accent-dark);
+      font-size: 0.86rem;
+      font-weight: bold;
+    }
+
+    .field {
+      margin-bottom: 14px;
+      text-align: left;
+    }
+
+    .field label {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 0.93rem;
+      color: var(--muted);
+    }
+
+    .field input,
+    .field select {
+      width: 100%;
+      padding: 13px 14px;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      font-size: 1rem;
+      background: #fbfdff;
+      color: var(--ink);
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .mini-stat {
+      border-radius: 16px;
+      background: #f7fafc;
+      padding: 14px;
+      border: 1px solid var(--line);
+    }
+
+    .mini-stat strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 1.05rem;
+    }
+
+    .run-button {
+      width: 100%;
+      background: linear-gradient(135deg, var(--accent), var(--accent-dark));
+      color: white;
+      font-weight: bold;
+    }
+
+    .action-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .action-row button {
+      background: #183153;
+      color: white;
+      font-weight: bold;
+    }
+
+    .action-row button.secondary {
+      background: #dfe9ef;
+      color: var(--ink);
+    }
+
+    .alert-box {
+      margin-top: 18px;
+      border-radius: 18px;
+      padding: 16px;
+      background: #fff4f4;
+      color: var(--danger);
+      border: 1px solid #f2caca;
+      display: none;
+    }
+
+    .status-box {
+      margin-top: 18px;
+      border-radius: 18px;
+      padding: 18px;
+      background: #f8fbfd;
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }
+
+    .hint {
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.4;
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 12px; }
+      .hero { padding: 18px; }
+      .hero h1 { font-size: 1.55rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="hero">
+      <h1>Dual Barrel Syringe Pump</h1>
+      <p>20 mL dual-barrel controller with calibrated volume and flow rate.</p>
+    </div>
+
+    <div class="status-grid">
+      <div class="panel">
+        <span class="label">Pump State</span>
+        <span class="stat-value" id="pumpState">Idle</span>
+      </div>
+      <div class="panel">
+        <span class="label">Alarm</span>
+        <span class="stat-value" id="alarmState">Normal</span>
+      </div>
+      <div class="panel">
+        <span class="label">Calibration</span>
+        <span class="stat-value">550 steps / mL</span>
+      </div>
+      <div class="panel">
+        <span class="label">Mode</span>
+        <span class="stat-value" id="modeLabel">Independent</span>
+        <div class="mode-switch">
+          <button id="modeIndependent" class="active" onclick="setMode('independent')">Independent</button>
+          <button id="modeSync" onclick="setMode('sync')">Synchronized</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="pump-grid">
+      <div class="panel">
+        <div class="pump-header">
+          <h2>Barrel A</h2>
+          <span class="pill" id="remaining1">20.00 mL left</span>
+        </div>
+
+        <div class="field">
+          <label for="volume1">Target Volume (mL)</label>
+          <input type="number" id="volume1" value="1.0" min="0.1" max="20" step="0.1" oninput="updatePreview(1)">
+        </div>
+
+        <div class="field">
+          <label for="flow1">Flow Rate (mL/min)</label>
+          <input type="number" id="flow1" value="1.0" min="0.1" max="20" step="0.1" oninput="updatePreview(1)">
+        </div>
+
+        <div class="field">
+          <label for="direction1">Direction</label>
+          <select id="direction1" onchange="updatePreview(1)">
+            <option value="1">Infuse</option>
+            <option value="-1">Withdraw</option>
+          </select>
+        </div>
+
+        <div class="mini-grid">
+          <div class="mini-stat">
+            <span class="label">Calculated Steps</span>
+            <strong id="steps1">550</strong>
+          </div>
+          <div class="mini-stat">
+            <span class="label">Estimated Time</span>
+            <strong id="time1">01:00</strong>
+          </div>
+        </div>
+
+        <button class="run-button" onclick="runSingle(1)">Run Barrel A</button>
+      </div>
+
+      <div class="panel">
+        <div class="pump-header">
+          <h2>Barrel B</h2>
+          <span class="pill" id="remaining2">20.00 mL left</span>
+        </div>
+
+        <div class="field">
+          <label for="volume2">Target Volume (mL)</label>
+          <input type="number" id="volume2" value="1.0" min="0.1" max="20" step="0.1" oninput="updatePreview(2)">
+        </div>
+
+        <div class="field">
+          <label for="flow2">Flow Rate (mL/min)</label>
+          <input type="number" id="flow2" value="1.0" min="0.1" max="20" step="0.1" oninput="updatePreview(2)">
+        </div>
+
+        <div class="field">
+          <label for="direction2">Direction</label>
+          <select id="direction2" onchange="updatePreview(2)">
+            <option value="1">Infuse</option>
+            <option value="-1">Withdraw</option>
+          </select>
+        </div>
+
+        <div class="mini-grid">
+          <div class="mini-stat">
+            <span class="label">Calculated Steps</span>
+            <strong id="steps2">550</strong>
+          </div>
+          <div class="mini-stat">
+            <span class="label">Estimated Time</span>
+            <strong id="time2">01:00</strong>
+          </div>
+        </div>
+
+        <button class="run-button" onclick="runSingle(2)">Run Barrel B</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <span class="label">Combined Controls</span>
+      <div class="action-row">
+        <button onclick="runBoth()">Run Both</button>
+        <button class="secondary" onclick="refreshStatus()">Refresh Status</button>
+      </div>
+      <div class="hint">
+        Synchronized mode starts both barrels together. Independent mode runs them one after the other when you choose Run Both.
+      </div>
+    </div>
+
+    <div class="alert-box" id="alertBox">Alarm</div>
+    <div class="status-box" id="statusBox">Ready</div>
+  </div>
+
+  <script>
+    let mode = "independent";
+    const stepsPerMl = 550;
+
+    function formatTime(seconds) {
+      const rounded = Math.max(0, Math.round(seconds));
+      const minutes = Math.floor(rounded / 60);
+      const secs = rounded % 60;
+      return String(minutes).padStart(2, "0") + ":" + String(secs).padStart(2, "0");
+    }
+
+    function updatePreview(motor) {
+      const volume = parseFloat(document.getElementById("volume" + motor).value) || 0;
+      const flow = parseFloat(document.getElementById("flow" + motor).value) || 0;
+      const steps = Math.round(volume * stepsPerMl);
+      const seconds = flow > 0 ? (volume / flow) * 60 : 0;
+
+      document.getElementById("steps" + motor).textContent = String(steps);
+      document.getElementById("time" + motor).textContent = formatTime(seconds);
+    }
+
+    function setMode(nextMode) {
+      mode = nextMode;
+      document.getElementById("modeLabel").textContent = nextMode === "sync" ? "Synchronized" : "Independent";
+      document.getElementById("modeIndependent").classList.toggle("active", nextMode === "independent");
+      document.getElementById("modeSync").classList.toggle("active", nextMode === "sync");
+      document.getElementById("statusBox").textContent =
+        nextMode === "sync"
+          ? "Synchronized mode selected. Both barrels will start together."
+          : "Independent mode selected. Each barrel can be run on its own.";
+    }
+
+    function updateDashboard(data) {
+      document.getElementById("pumpState").textContent = data.state;
+      document.getElementById("remaining1").textContent = Number(data.remaining1).toFixed(2) + " mL left";
+      document.getElementById("remaining2").textContent = Number(data.remaining2).toFixed(2) + " mL left";
+      document.getElementById("statusBox").textContent = data.message;
+
+      const alarmBox = document.getElementById("alertBox");
+      const alarmState = document.getElementById("alarmState");
+
+      if (data.alarm && data.alarm.length > 0) {
+        alarmState.textContent = "Active";
+        alarmBox.style.display = "block";
+        alarmBox.textContent = data.alarm;
+      } else {
+        alarmState.textContent = "Normal";
+        alarmBox.style.display = "none";
+      }
+    }
+
+    function buildMotorParams(motor) {
+      const volume = document.getElementById("volume" + motor).value;
+      const flow = document.getElementById("flow" + motor).value;
+      const direction = document.getElementById("direction" + motor).value;
+
+      return "volume" + motor + "=" + encodeURIComponent(volume) +
+        "&flow" + motor + "=" + encodeURIComponent(flow) +
+        "&dir" + motor + "=" + encodeURIComponent(direction);
+    }
+
+    async function runSingle(motor) {
+      try {
+        const url = "/move?motor=" + motor +
+          "&volume=" + encodeURIComponent(document.getElementById("volume" + motor).value) +
+          "&flowRate=" + encodeURIComponent(document.getElementById("flow" + motor).value) +
+          "&dir=" + encodeURIComponent(document.getElementById("direction" + motor).value);
+        const response = await fetch(url);
+        const data = await response.json();
+        updateDashboard(data);
+      } catch (error) {
+        document.getElementById("statusBox").textContent = "Connection error while contacting the pump.";
+      }
+    }
+
+    async function runBoth() {
+      try {
+        const url = "/moveBoth?mode=" + encodeURIComponent(mode) + "&" +
+          buildMotorParams(1) + "&" + buildMotorParams(2);
+        const response = await fetch(url);
+        const data = await response.json();
+        updateDashboard(data);
+      } catch (error) {
+        document.getElementById("statusBox").textContent = "Connection error while starting both barrels.";
+      }
+    }
+
+    async function refreshStatus() {
+      try {
+        const response = await fetch("/status");
+        const data = await response.json();
+        updateDashboard(data);
+      } catch (error) {
+        document.getElementById("statusBox").textContent = "Unable to refresh pump status.";
+      }
+    }
+
+    updatePreview(1);
+    updatePreview(2);
+    refreshStatus();
+  </script>
+</body>
+</html>
+)rawliteral";
+
+unsigned long calculateStepIntervalUs(float flowRateMlMin) {
+  if (flowRateMlMin <= 0) {
+    return 1000000UL;
+  }
+
+  float stepsPerSecond = (flowRateMlMin * stepsPerMl) / 60.0;
+  if (stepsPerSecond <= 0) {
+    return 1000000UL;
+  }
+
+  unsigned long interval = (unsigned long)(1000000.0 / stepsPerSecond);
+  if (interval < (minPulseWidthUs * 2UL)) {
+    interval = minPulseWidthUs * 2UL;
+  }
+  return interval;
+}
+
+void pulseStep(int stepPin) {
+  digitalWrite(stepPin, HIGH);
+  delayMicroseconds(minPulseWidthUs);
+  digitalWrite(stepPin, LOW);
+}
+
+void moveMotor(int dirPin, int stepPin, int steps, float flowRateMlMin) {
+  if (steps >= 0) {
+    digitalWrite(dirPin, LOW);
+  } else {
+    digitalWrite(dirPin, HIGH);
+    steps = -steps;
+  }
+
+  unsigned long stepIntervalUs = calculateStepIntervalUs(flowRateMlMin);
+
+  for (int i = 0; i < steps; i++) {
+    pulseStep(stepPin);
+    if (stepIntervalUs > minPulseWidthUs) {
+      delayMicroseconds(stepIntervalUs - minPulseWidthUs);
+    }
+  }
+}
+
+void moveDualMotors(int steps1, int steps2, float flowRate1, float flowRate2) {
+  if (steps1 >= 0) {
+    digitalWrite(dirPin1, LOW);
+  } else {
+    digitalWrite(dirPin1, HIGH);
+    steps1 = -steps1;
+  }
+
+  if (steps2 >= 0) {
+    digitalWrite(dirPin2, LOW);
+  } else {
+    digitalWrite(dirPin2, HIGH);
+    steps2 = -steps2;
+  }
+
+  unsigned long interval1 = calculateStepIntervalUs(flowRate1);
+  unsigned long interval2 = calculateStepIntervalUs(flowRate2);
+  unsigned long nextStep1 = micros();
+  unsigned long nextStep2 = micros();
+  int done1 = 0;
+  int done2 = 0;
+
+  while (done1 < steps1 || done2 < steps2) {
+    unsigned long now = micros();
+    bool moved = false;
+
+    if (done1 < steps1 && (long)(now - nextStep1) >= 0) {
+      pulseStep(stepPin1);
+      nextStep1 += interval1;
+      done1++;
+      moved = true;
+    }
+
+    if (done2 < steps2 && (long)(now - nextStep2) >= 0) {
+      pulseStep(stepPin2);
+      nextStep2 += interval2;
+      done2++;
+      moved = true;
+    }
+
+    if (!moved) {
+      delayMicroseconds(50);
+    }
+  }
+}
+
+bool validateVolumeChange(float remainingVolume, float volume, int dir, String& errorMessage) {
+  if (volume <= 0 || volume > syringeVolumeMl) {
+    errorMessage = "Enter a volume between 0.1 and 20.0 mL.";
+    return false;
+  }
+
+  if (dir == 1 && volume > remainingVolume) {
+    errorMessage = "Requested infuse volume is greater than remaining fluid.";
+    return false;
+  }
+
+  if (dir == -1 && remainingVolume + volume > syringeVolumeMl) {
+    errorMessage = "Withdraw volume exceeds syringe refill capacity.";
+    return false;
+  }
+
+  return true;
+}
+
+void applyVolumeChange(float& remainingVolume, float volume, int dir) {
+  if (dir == 1) {
+    remainingVolume -= volume;
+  } else {
+    remainingVolume += volume;
+  }
+}
+
+void handleRoot() {
+  server.send(200, "text/html", htmlPage);
+}
+
+void handleStatus() {
+  server.send(200, "application/json", makeJsonResponse(lastAction, ""));
+}
+
+void handleMove() {
+  int motor = server.arg("motor").toInt();
+  float volume = server.arg("volume").toFloat();
+  float flowRate = server.arg("flowRate").toFloat();
+  int dir = server.arg("dir").toInt();
+  int steps = (int)(volume * stepsPerMl + 0.5f) * dir;
+  String errorMessage = "";
+
+  if (flowRate <= 0) {
+    server.send(400, "application/json", makeJsonResponse("Flow rate must be greater than 0 mL/min.", "Flow rate out of range"));
+    return;
+  }
+
+  if (motor == 1) {
+    if (!validateVolumeChange(remainingVolume1, volume, dir, errorMessage)) {
+      server.send(400, "application/json", makeJsonResponse(errorMessage, "Barrel A command blocked"));
+      return;
+    }
+
+    pumpState = "Running Barrel A";
+    moveMotor(dirPin1, stepPin1, steps, flowRate);
+    applyVolumeChange(remainingVolume1, volume, dir);
+    pumpState = "Idle";
+    lastAction = "Barrel A ";
+    lastAction += (dir == 1 ? "infused " : "withdrew ");
+    lastAction += String(volume, 2) + " mL at " + String(flowRate, 2) + " mL/min (" + String(abs(steps)) + " steps)";
+    server.send(200, "application/json", makeJsonResponse(lastAction, ""));
+    return;
+  }
+
+  if (motor == 2) {
+    if (!validateVolumeChange(remainingVolume2, volume, dir, errorMessage)) {
+      server.send(400, "application/json", makeJsonResponse(errorMessage, "Barrel B command blocked"));
+      return;
+    }
+
+    pumpState = "Running Barrel B";
+    moveMotor(dirPin2, stepPin2, steps, flowRate);
+    applyVolumeChange(remainingVolume2, volume, dir);
+    pumpState = "Idle";
+    lastAction = "Barrel B ";
+    lastAction += (dir == 1 ? "infused " : "withdrew ");
+    lastAction += String(volume, 2) + " mL at " + String(flowRate, 2) + " mL/min (" + String(abs(steps)) + " steps)";
+    server.send(200, "application/json", makeJsonResponse(lastAction, ""));
+    return;
+  }
+
+  server.send(400, "application/json", makeJsonResponse("Invalid barrel selection.", "Invalid motor"));
+}
+
+void handleMoveBoth() {
+  String mode = server.arg("mode");
+  float volume1 = server.arg("volume1").toFloat();
+  float flow1 = server.arg("flow1").toFloat();
+  int dir1 = server.arg("dir1").toInt();
+  float volume2 = server.arg("volume2").toFloat();
+  float flow2 = server.arg("flow2").toFloat();
+  int dir2 = server.arg("dir2").toInt();
+  String errorMessage = "";
+
+  if (flow1 <= 0 || flow2 <= 0) {
+    server.send(400, "application/json", makeJsonResponse("Both flow rates must be greater than 0 mL/min.", "Flow rate out of range"));
+    return;
+  }
+
+  if (!validateVolumeChange(remainingVolume1, volume1, dir1, errorMessage)) {
+    server.send(400, "application/json", makeJsonResponse(errorMessage, "Barrel A command blocked"));
+    return;
+  }
+
+  if (!validateVolumeChange(remainingVolume2, volume2, dir2, errorMessage)) {
+    server.send(400, "application/json", makeJsonResponse(errorMessage, "Barrel B command blocked"));
+    return;
+  }
+
+  int steps1 = (int)(volume1 * stepsPerMl + 0.5f) * dir1;
+  int steps2 = (int)(volume2 * stepsPerMl + 0.5f) * dir2;
+  pumpState = (mode == "sync") ? "Running Both (Sync)" : "Running Both";
+
+  if (mode == "sync") {
+    moveDualMotors(steps1, steps2, flow1, flow2);
+  } else {
+    moveMotor(dirPin1, stepPin1, steps1, flow1);
+    moveMotor(dirPin2, stepPin2, steps2, flow2);
+  }
+
+  applyVolumeChange(remainingVolume1, volume1, dir1);
+  applyVolumeChange(remainingVolume2, volume2, dir2);
+  pumpState = "Idle";
+
+  lastAction = "Barrel A ";
+  lastAction += (dir1 == 1 ? "infused " : "withdrew ");
+  lastAction += String(volume1, 2);
+  lastAction += " mL and Barrel B ";
+  lastAction += (dir2 == 1 ? "infused " : "withdrew ");
+  lastAction += String(volume2, 2);
+  lastAction += " mL using ";
+  lastAction += (mode == "sync") ? "synchronized" : "independent";
+  lastAction += " mode.";
+
+  server.send(200, "application/json", makeJsonResponse(lastAction, ""));
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(dirPin1, OUTPUT);
+  pinMode(stepPin1, OUTPUT);
+  pinMode(dirPin2, OUTPUT);
+  pinMode(stepPin2, OUTPUT);
+
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Connected");
+  Serial.println(WiFi.localIP());
+
+  server.on("/", handleRoot);
+  server.on("/status", handleStatus);
+  server.on("/move", handleMove);
+  server.on("/moveBoth", handleMoveBoth);
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+}
